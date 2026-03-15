@@ -7,6 +7,7 @@ Current step: 1 — SparkSession factory
 """
 
 import pytest
+from pathlib import Path
 from pyspark.sql import SparkSession
 from ingestion.spark_ingest import build_spark
 
@@ -75,3 +76,113 @@ class TestBuildSpark:
         """
         same_session = build_spark(app_name="different-name")
         assert same_session is spark
+
+
+# ── Step 2 tests: dataset download ───────────────────────────────────────────
+# We never call Kaggle for real in tests. Reasons:
+#
+#   1. SPEED: a network download in tests makes the suite slow and flaky
+#   2. PORTABILITY: every developer needs a Kaggle key to run tests — bad
+#   3. ISOLATION: tests should only test YOUR code, not Kaggle's servers
+#
+# Solution: unittest.mock.patch temporarily replaces
+# kagglehub.dataset_download with a fake function we control.
+# The real function is restored automatically after each test.
+#
+# This pattern is called "mocking at the boundary" — you mock the
+# external call and test everything your code does around it.
+
+from unittest.mock import patch, MagicMock
+from ingestion.spark_ingest import download_dataset
+
+
+class TestDownloadDataset:
+
+    def test_returns_path_object(self, tmp_path):
+        """
+        download_dataset() must return a Path, not a raw string.
+        Returning Path means callers can do path / "subdir" safely
+        instead of string concatenation which breaks across OS.
+
+        tmp_path is a pytest built-in fixture — it creates a fresh
+        temporary directory for each test and deletes it afterwards.
+        We use it as our fake Kaggle cache directory.
+        """
+        fake_csv = tmp_path / "marketing_AB.csv"
+        fake_csv.touch()  # create an empty file at that path
+
+        with patch("ingestion.spark_ingest.kagglehub.dataset_download",
+                   return_value=str(tmp_path)):
+            result = download_dataset()
+
+        assert isinstance(result, Path)
+
+    def test_returns_csv_filename(self, tmp_path):
+        """
+        The returned Path must point to marketing_AB.csv specifically,
+        not just the directory. Callers pass this directly to Spark's
+        CSV reader so the filename must be correct.
+        """
+        fake_csv = tmp_path / "marketing_AB.csv"
+        fake_csv.touch()
+
+        with patch("ingestion.spark_ingest.kagglehub.dataset_download",
+                   return_value=str(tmp_path)):
+            result = download_dataset()
+
+        assert result.name == "marketing_AB.csv"
+
+    def test_finds_csv_in_nested_subdirectory(self, tmp_path):
+        """
+        Kaggle sometimes nests files inside subdirectories in the zip.
+        Our glob("**/*.csv") finds the file at any nesting depth.
+        This test verifies that — without it a version bump on Kaggle's
+        side could silently break the pipeline.
+        """
+        nested = tmp_path / "versions" / "1"
+        nested.mkdir(parents=True)
+        fake_csv = nested / "marketing_AB.csv"
+        fake_csv.touch()
+
+        with patch("ingestion.spark_ingest.kagglehub.dataset_download",
+                   return_value=str(tmp_path)):
+            result = download_dataset()
+
+        assert result.exists()
+
+    def test_raises_file_not_found_if_csv_missing(self, tmp_path):
+        """
+        If the download directory exists but contains no CSV
+        (e.g. Kaggle renamed the file), we raise FileNotFoundError
+        with a clear message — not a cryptic AttributeError later
+        when Spark tries to read a None path.
+
+        pytest.raises() verifies both that the exception is raised
+        AND that the message contains "marketing_AB.csv".
+        """
+        # tmp_path is an empty directory — no CSV inside
+        with patch("ingestion.spark_ingest.kagglehub.dataset_download",
+                   return_value=str(tmp_path)):
+            with pytest.raises(FileNotFoundError, match="marketing_AB.csv"):
+                download_dataset()
+
+    def test_calls_kaggle_with_correct_dataset_slug(self):
+        """
+        Verifies the exact dataset identifier passed to kagglehub.
+        If someone changes the slug by accident, the download silently
+        fetches the wrong dataset. This test catches that.
+
+        MagicMock() creates a fake callable that records every call
+        made to it. assert_called_once_with() then verifies it was
+        called exactly once with the right argument.
+        """
+        mock_download = MagicMock(return_value="/nonexistent/path")
+
+        with patch("ingestion.spark_ingest.kagglehub.dataset_download",
+                   mock_download):
+            try:
+                download_dataset()
+            except FileNotFoundError:
+                pass  # expected — /nonexistent/path doesn't exist
+
+        mock_download.assert_called_once_with("faviovaz/marketing-ab-testing")        
