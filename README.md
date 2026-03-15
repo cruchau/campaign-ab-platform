@@ -20,3 +20,20 @@ Data dictionary:
 - total ads: Amount of ads seen by person
 - most ads day: Day that the person saw the biggest amount of ads
 - most ads hour: Hour of day that the person saw the biggest amount of ads
+
+---
+
+**Ready for Layer 1 — dbt.**
+
+Here's what dbt will do with these Parquet files. dbt is a transformation tool — it takes raw data and builds a clean, structured data warehouse on top of it using SQL. It doesn't move data or run infrastructure — it just runs SQL queries and materialises the results as tables.
+
+Our dbt project will have three layers:
+```
+data/raw/           ← Parquet files (Layer 0 output)
+    ↓
+staging/            ← exact copy of raw, just typed and named correctly
+    ↓
+intermediate/       ← business logic: user-level metrics, exposure calculations
+    ↓
+marts/              ← final tables: fact_exposures, dim_campaigns, fct_ab_results
+                       these are what the A/B engine and dashboard query
