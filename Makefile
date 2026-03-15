@@ -61,9 +61,7 @@ test:
 	pytest tests/ -v --cov=ingestion --cov=ab_engine --cov=ml --cov-report=term-missing
 
 test-step1:
-	pytest tests/test_spark_ingest.py::TestDownloadDataset \
-	       tests/test_spark_ingest.py::TestBuildSpark \
-	       -v --tb=short
+	pytest tests/test_spark_ingest.py::TestBuildSpark -v --tb=short
  
 lint:
 	ruff check ingestion/ ab_engine/ ml/ dashboard/ tests/
