@@ -298,3 +298,103 @@ def enrich(df: DataFrame) -> DataFrame:
             F.to_date(F.lit(today))
         )
     )
+
+
+# ── Step 6: write_parquet() ───────────────────────────────────────────────────
+# Writes the enriched DataFrame to partitioned Parquet files.
+#
+# Key decisions:
+#
+#   partitionBy("ingestion_date")
+#     Creates one folder per date: ingestion_date=2025-03-15/
+#     Tomorrow's run overwrites only today's folder — past data is safe.
+#     dbt incremental models can then filter WHERE ingestion_date = today.
+#
+#   mode("overwrite")
+#     If today's partition already exists (e.g. pipeline re-run),
+#     overwrite it cleanly. Without this, Spark appends and you get
+#     duplicate rows on every re-run.
+#
+#   repartition(4)
+#     Writes 4 Parquet files per partition — right-sized for ~600k rows.
+#     Too many small files = slow reads (file open overhead).
+#     Too few large files = can't parallelise reads.
+#     Rule of thumb: aim for ~128MB per file.
+
+
+def write_parquet(df: DataFrame, output_path: str) -> None:
+    """
+    Writes the enriched DataFrame to snappy-compressed Parquet,
+    partitioned by ingestion_date.
+
+    Args:
+        df:          enriched DataFrame from enrich()
+        output_path: directory to write to (e.g. "data/raw/")
+    """
+    log.info("Writing Parquet to: %s (partitioned by ingestion_date)",
+             output_path)
+
+    (
+        df
+        .repartition(4)
+        .write
+        .mode("overwrite")
+        .partitionBy("ingestion_date")
+        .parquet(output_path)
+    )
+
+    log.info("Write complete.")
+    
+
+# ── main() ────────────────────────────────────────────────────────────────────
+# Wires all steps together into a single pipeline run.
+# Called by `make ingest` and `make ingest-sample`.
+#
+# argparse lets us pass --output and --sample from the command line
+# without hardcoding paths in the source code.
+
+import argparse
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Campaign A/B — ingestion job")
+    p.add_argument("--output", default="data/raw/",
+                   help="Output directory for Parquet files")
+    p.add_argument("--sample", type=float, default=None,
+                   help="Optional sample fraction for dev runs (e.g. 0.1)")
+    return p.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    spark = build_spark()
+
+    try:
+        # Step 2: download
+        csv_path = download_dataset()
+
+        # Step 3: read
+        df = read_raw(spark, csv_path)
+
+        # Optional: sample for fast dev runs
+        if args.sample:
+            log.info("Sampling %.0f%% of rows", args.sample * 100)
+            df = df.sample(fraction=args.sample, seed=42)
+
+        # Step 4: normalise
+        df = normalise(df)
+
+        # Step 5: enrich
+        df = enrich(df)
+
+        # Step 6: write
+        write_parquet(df, args.output)
+
+        log.info("Pipeline complete. Rows written: %d", df.count())
+
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    main()

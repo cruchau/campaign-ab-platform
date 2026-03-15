@@ -73,6 +73,11 @@ test-step3:
 
 test-step4:
 	pytest tests/test_spark_ingest.py::TestEnrich -v --tb=short
+
+test-step5:
+	pytest tests/test_spark_ingest.py::TestWriteParquet \
+	       tests/test_spark_ingest.py::TestEndToEnd \
+	       -v --tb=short
  
 lint:
 	ruff check ingestion/ ab_engine/ ml/ dashboard/ tests/

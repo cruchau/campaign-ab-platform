@@ -527,3 +527,143 @@ class TestEnrich:
         df = enrich(self._normalised_df(spark))
         result = df.collect()[0]["ingestion_date"]
         assert result == date.today()
+        
+
+# ── Step 6 tests: write_parquet() + end-to-end ────────────────────────────────
+# Two kinds of tests here:
+#
+#   TestWriteParquet  : unit tests for the writer in isolation
+#   TestEndToEnd      : smoke test that runs the full pipeline
+#                       on a tiny DataFrame and verifies the output
+#
+# For the writer tests we use tmp_path — pytest creates a fresh
+# temporary directory for each test and deletes it afterwards.
+# Perfect for testing file writes without polluting data/raw/.
+
+from ingestion.spark_ingest import write_parquet
+
+
+class TestWriteParquet:
+
+    def _enriched_df(self, spark):
+        """Minimal enriched DataFrame — what enrich() produces."""
+        from pyspark.sql.types import DateType
+        schema = StructType([
+            StructField("user_id",        IntegerType(), nullable=False),
+            StructField("test_group",     StringType(),  nullable=False),
+            StructField("converted",      BooleanType(), nullable=False),
+            StructField("total_ads",      IntegerType(), nullable=True),
+            StructField("most_ads_day",   StringType(),  nullable=True),
+            StructField("most_ads_hour",  IntegerType(), nullable=True),
+            StructField("is_control",     BooleanType(), nullable=False),
+            StructField("ad_freq_bucket", StringType(),  nullable=False),
+            StructField("ingestion_date", DateType(),    nullable=False),
+        ])
+        today = date.today()
+        return spark.createDataFrame(
+            [(1, "ad", False, 5, "Monday", 10, False, "low", today),
+             (2, "psa", True, 3, "Tuesday", 14, True, "low", today)],
+            schema=schema
+        )
+
+    def test_creates_output_directory(self, spark, tmp_path):
+        """
+        write_parquet() must create the output directory if it
+        doesn't exist. Callers shouldn't have to mkdir first.
+        """
+        output = str(tmp_path / "output")
+        write_parquet(self._enriched_df(spark), output)
+        assert (tmp_path / "output").exists()
+
+    def test_creates_parquet_files(self, spark, tmp_path):
+        """
+        Output directory must contain actual .parquet files.
+        Verifies the write happened — not just directory creation.
+        """
+        output = str(tmp_path / "output")
+        write_parquet(self._enriched_df(spark), output)
+        parquet_files = list((tmp_path / "output").rglob("*.parquet"))
+        assert len(parquet_files) > 0
+
+    def test_partitioned_by_ingestion_date(self, spark, tmp_path):
+        """
+        Output must be partitioned by ingestion_date.
+        Spark creates folders named ingestion_date=YYYY-MM-DD/.
+        dbt incremental models depend on this folder structure.
+        """
+        output = str(tmp_path / "output")
+        write_parquet(self._enriched_df(spark), output)
+        partition_dirs = [
+            d for d in (tmp_path / "output").iterdir()
+            if d.is_dir() and d.name.startswith("ingestion_date=")
+        ]
+        assert len(partition_dirs) > 0
+
+    def test_data_readable_after_write(self, spark, tmp_path):
+        """
+        Most important test: data written can be read back correctly.
+        Verifies the full write-read cycle — catches encoding issues,
+        schema mismatches, and silent write failures.
+        """
+        output = str(tmp_path / "output")
+        original_df = self._enriched_df(spark)
+        write_parquet(original_df, output)
+
+        read_back = spark.read.parquet(output)
+        assert read_back.count() == original_df.count()
+
+
+class TestEndToEnd:
+
+    def test_full_pipeline_on_small_dataframe(self, spark, tmp_path):
+        """
+        Runs the complete pipeline on 5 rows:
+        read_raw → normalise → enrich → write_parquet → read back
+
+        This is the most important test in the suite — it catches
+        bugs that only appear when functions are composed together,
+        not when tested in isolation.
+
+        We build a small CSV inline rather than using the real dataset
+        so the test runs in milliseconds and works without Kaggle.
+        """
+        # Build a minimal CSV file
+        csv_file = tmp_path / "test.csv"
+        csv_file.write_text(
+            "user id,test group,converted,total ads,most ads day,most ads hour\n"
+            "1,ad,False,5,Monday,10\n"
+            "2,psa,True,3,Tuesday,14\n"
+            "3,ad,False,0,Wednesday,9\n"
+            "4,psa,False,25,Thursday,18\n"
+            "5,ad,True,100,Friday,21\n"
+        )
+
+        output = str(tmp_path / "output")
+
+        # Run the full pipeline
+        df = read_raw(spark, csv_file)
+        df = normalise(df)
+        df = enrich(df)
+        write_parquet(df, output)
+
+        # Read back and verify
+        result = spark.read.parquet(output)
+
+        # Row count preserved
+        assert result.count() == 5
+
+        # All enriched columns present
+        assert "is_control"     in result.columns
+        assert "ad_freq_bucket" in result.columns
+        assert "ingestion_date" in result.columns
+
+        # Snake_case columns — no spaces
+        assert "user_id"   in result.columns
+        assert "user id"   not in result.columns
+
+        # Bucket correctness on the composed pipeline
+        rows = {r["user_id"]: r for r in result.collect()}
+        assert rows[1]["ad_freq_bucket"] == "low"       # 5 ads
+        assert rows[3]["ad_freq_bucket"] == "zero"      # 0 ads
+        assert rows[4]["ad_freq_bucket"] == "high"      # 25 ads
+        assert rows[5]["ad_freq_bucket"] == "very_high" # 100 ads
