@@ -24,17 +24,13 @@ print('Dataset cached at:', p)"
 # ── Layer 0: Ingestion ─────────────────────────────────────────────────────────
 # Download the CSV from Kaggle first:
 #   kaggle datasets download -d faviovaz/marketing-ab-testing -p data/source/ --unzip
+# ── Layer 0: Ingestion ─────────────────────────────────────────────────────────
 ingest:
-	python ingestion/spark_ingest.py \
-		--input  data/source/marketing_AB.csv \
-		--output data/raw/
- 
+	python -m ingestion.spark_ingest --output data/raw/
+
 ingest-sample:
-	python ingestion/spark_ingest.py \
-		--input  data/source/marketing_AB.csv \
-		--output data/raw/ \
-		--sample 0.1
- 
+	python -m ingestion.spark_ingest --output data/raw/ --sample 0.1
+	
 
 # ── Layer 1: dbt warehouse ─────────────────────────────────────────────────────
 dbt:

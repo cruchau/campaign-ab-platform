@@ -156,6 +156,7 @@ from pyspark.sql.types import (
 # Column names match the CSV header including spaces —
 # we rename them to snake_case in normalise() (Step 4).
 RAW_SCHEMA = StructType([
+    StructField("row_index",     IntegerType(), nullable=True),   # ← add this
     StructField("user id",       IntegerType(), nullable=False),
     StructField("test group",    StringType(),  nullable=False),
     StructField("converted",     BooleanType(), nullable=False),
@@ -217,8 +218,9 @@ def normalise(df: DataFrame) -> DataFrame:
         df
         # Step 4a: rename all columns to snake_case
         # toDF() takes a list of new names in the same order as current columns
-        .toDF("user_id", "test_group", "converted",
-              "total_ads", "most_ads_day", "most_ads_hour")
+        .toDF("row_index", "user_id", "test_group", "converted",
+            "total_ads", "most_ads_day", "most_ads_hour")
+        .drop("row_index")
 
         # Step 4b: lowercase and trim test_group
         # F.trim() removes accidental whitespace, F.lower() normalises case
