@@ -122,3 +122,68 @@ def download_dataset() -> Path:
     csv_path = matches[0]
     log.info("CSV located at: %s", csv_path)
     return csv_path
+ 
+# Verify that the function was appended: grep -n "def " ingestion/spark_ingest.py
+# grep stands for “Global Regular Expression Print”.
+# It’s a command-line tool used to search text in files or output from other commands.
+# It finds lines that match a pattern (text or regex) and prints them.
+# Think of it as “find this text in a file or output”.
+
+# ── Step 3: Raw CSV reader ────────────────────────────────────────────────────
+# Why explicit schema instead of Spark's inferSchema=True?
+#
+#   1. PERFORMANCE: inferSchema reads the file twice — once to guess
+#      types, once to load. Explicit schema = single pass.
+#
+#   2. CORRECTNESS: inference can silently misread types. If Spark reads
+#      `converted` as StringType instead of BooleanType, every downstream
+#      aggregation (conversion rate, lift %) silently produces wrong numbers.
+#
+#   3. FAIL FAST: mode="FAILFAST" makes Spark throw an error immediately
+#      on any row that doesn't match the schema, instead of silently
+#      filling nulls. You want to know about bad data at ingestion,
+#      not discover it in a dashboard three days later.
+
+from pyspark.sql.types import (
+    BooleanType,
+    IntegerType,
+    StringType,
+    StructField,
+    StructType,
+)
+
+# Explicit schema matching the Kaggle CSV exactly.
+# Column names match the CSV header including spaces —
+# we rename them to snake_case in normalise() (Step 4).
+RAW_SCHEMA = StructType([
+    StructField("user id",       IntegerType(), nullable=False),
+    StructField("test group",    StringType(),  nullable=False),
+    StructField("converted",     BooleanType(), nullable=False),
+    StructField("total ads",     IntegerType(), nullable=True),
+    StructField("most ads day",  StringType(),  nullable=True),
+    StructField("most ads hour", IntegerType(), nullable=True),
+])
+
+
+def read_raw(spark: SparkSession, csv_path: Path) -> "DataFrame":
+    """
+    Reads the raw CSV into a Spark DataFrame with enforced schema.
+
+    mode=FAILFAST  → crash immediately on any malformed row
+    nullValue=""   → treat empty strings as null
+    header=True    → first row is column names, not data
+    """
+    log.info("Reading CSV: %s", csv_path)
+
+    df = (
+        spark.read
+        .option("header", "true")
+        .option("mode", "FAILFAST")
+        .option("nullValue", "")
+        .schema(RAW_SCHEMA)
+        .csv(str(csv_path))
+    )
+
+    row_count = df.count()
+    log.info("Loaded %d rows with %d columns", row_count, len(df.columns))
+    return df

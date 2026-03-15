@@ -64,6 +64,9 @@ test-step1:
 	pytest tests/test_spark_ingest.py::TestBuildSpark \
 	       tests/test_spark_ingest.py::TestDownloadDataset \
 	       -v --tb=short
+
+test-step2:
+	pytest tests/test_spark_ingest.py::TestReadRaw -v --tb=short
  
 lint:
 	ruff check ingestion/ ab_engine/ ml/ dashboard/ tests/

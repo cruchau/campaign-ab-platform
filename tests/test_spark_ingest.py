@@ -185,4 +185,112 @@ class TestDownloadDataset:
             except FileNotFoundError:
                 pass  # expected — /nonexistent/path doesn't exist
 
-        mock_download.assert_called_once_with("faviovaz/marketing-ab-testing")        
+        mock_download.assert_called_once_with("faviovaz/marketing-ab-testing")      
+
+
+# ── Step 3 tests: raw CSV reader ─────────────────────────────────────────────
+# We test read_raw() without the real CSV file by creating a tiny
+# in-memory DataFrame that mimics the CSV structure.
+#
+# Why not use the real CSV?
+#   - The real file is 40MB — slow to read in every test run
+#   - Tests should be fast and work without any external files
+#   - We control exactly what data the tests see, making assertions precise
+#
+# spark.createDataFrame() lets us build a DataFrame from a plain
+# Python list. We pair it with an explicit schema so the types match
+# exactly what read_raw() would produce from the real CSV.
+
+from ingestion.spark_ingest import read_raw, RAW_SCHEMA
+from unittest.mock import patch
+from pyspark.sql.types import StructType
+
+
+class TestReadRaw:
+
+    def _make_csv(self, tmp_path, content: str) -> Path:
+        """
+        Helper that writes a CSV string to a temp file and returns its Path.
+        Used to give read_raw() a real file to read without needing Kaggle.
+        """
+        csv_file = tmp_path / "test.csv"
+        csv_file.write_text(content)
+        return csv_file
+
+    def test_returns_dataframe(self, spark, tmp_path):
+        """
+        read_raw() must return a Spark DataFrame, not None or a pandas df.
+        Most basic smoke test — if this fails the function is broken entirely.
+        """
+        csv = self._make_csv(tmp_path, (
+            "user id,test group,converted,total ads,most ads day,most ads hour\n"
+            "1,ad,False,5,Monday,10\n"
+        ))
+        df = read_raw(spark, csv)
+        from pyspark.sql import DataFrame
+        assert isinstance(df, DataFrame)
+
+    def test_correct_row_count(self, spark, tmp_path):
+        """
+        Verifies all rows are loaded — none silently dropped.
+        3 data rows in, 3 rows out.
+        """
+        csv = self._make_csv(tmp_path, (
+            "user id,test group,converted,total ads,most ads day,most ads hour\n"
+            "1,ad,False,5,Monday,10\n"
+            "2,psa,True,3,Tuesday,14\n"
+            "3,ad,False,10,Friday,9\n"
+        ))
+        df = read_raw(spark, csv)
+        assert df.count() == 3
+
+    def test_correct_column_names(self, spark, tmp_path):
+        """
+        Verifies the DataFrame has exactly the columns we declared
+        in RAW_SCHEMA — no extras, no missing, correct names including spaces.
+        Column names with spaces are valid in Spark but must be handled
+        carefully in SQL (use backticks: `user id`).
+        """
+        csv = self._make_csv(tmp_path, (
+            "user id,test group,converted,total ads,most ads day,most ads hour\n"
+            "1,ad,False,5,Monday,10\n"
+        ))
+        df = read_raw(spark, csv)
+        assert df.columns == [
+            "user id", "test group", "converted",
+            "total ads", "most ads day", "most ads hour"
+        ]
+
+    def test_converted_is_boolean(self, spark, tmp_path):
+        """
+        The most important type check. If `converted` is read as StringType
+        instead of BooleanType, then F.mean("converted") returns null
+        instead of a conversion rate — a silent data quality bug.
+        This test catches that before it reaches any dashboard.
+        """
+        csv = self._make_csv(tmp_path, (
+            "user id,test group,converted,total ads,most ads day,most ads hour\n"
+            "1,ad,False,5,Monday,10\n"
+        ))
+        df = read_raw(spark, csv)
+        converted_type = dict(df.dtypes)["converted"]
+        assert converted_type == "boolean", (
+            f"Expected 'boolean' but got '{converted_type}' — "
+            "conversion rate calculations will silently fail"
+        )
+
+    def test_nulls_in_nullable_columns(self, spark, tmp_path):
+        """
+        Verifies that empty values in nullable columns (total ads,
+        most ads day, most ads hour) become null in Spark — not the
+        string "null" or "None", which would break numeric aggregations.
+        """
+        csv = self._make_csv(tmp_path, (
+            "user id,test group,converted,total ads,most ads day,most ads hour\n"
+            "1,ad,False,,,\n"
+        ))
+        df = read_raw(spark, csv)
+        row = df.collect()[0]
+        assert row["total ads"] is None
+        assert row["most ads day"] is None
+        assert row["most ads hour"] is None  
