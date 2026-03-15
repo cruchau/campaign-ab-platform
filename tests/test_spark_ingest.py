@@ -397,3 +397,133 @@ class TestNormalise:
         """
         df = normalise(self._raw_df(spark, most_ads_hour=13))
         assert df.collect()[0]["most_ads_hour"] == 13
+        
+
+# ── Step 5 tests: enrich() ────────────────────────────────────────────────────
+# We test each derived column independently.
+# Key principle: test the BOUNDARY values of each bucket, not just
+# the middle. Boundary bugs (is 50 "high" or "very_high"?) are the
+# most common source of silent data errors in bucketing logic.
+
+from ingestion.spark_ingest import enrich
+from datetime import date
+
+
+class TestEnrich:
+
+    def _normalised_df(self, spark, total_ads=5, test_group="ad"):
+        """
+        Helper that creates a minimal normalised DataFrame —
+        what normalise() would produce — for enrich() to work on.
+        """
+        schema = StructType([
+            StructField("user_id",       IntegerType(), nullable=False),
+            StructField("test_group",    StringType(),  nullable=False),
+            StructField("converted",     BooleanType(), nullable=False),
+            StructField("total_ads",     IntegerType(), nullable=True),
+            StructField("most_ads_day",  StringType(),  nullable=True),
+            StructField("most_ads_hour", IntegerType(), nullable=True),
+        ])
+        return spark.createDataFrame(
+            [(1, test_group, False, total_ads, "Monday", 10)],
+            schema=schema
+        )
+
+    def test_adds_is_control_column(self, spark):
+        """
+        enrich() must add an is_control column.
+        Existence check — type and value checked in separate tests.
+        """
+        df = enrich(self._normalised_df(spark))
+        assert "is_control" in df.columns
+
+    def test_is_control_true_for_psa(self, spark):
+        """
+        PSA group = control group → is_control must be True.
+        """
+        df = enrich(self._normalised_df(spark, test_group="psa"))
+        assert df.collect()[0]["is_control"] is True
+
+    def test_is_control_false_for_ad(self, spark):
+        """
+        Ad group = treatment group → is_control must be False.
+        """
+        df = enrich(self._normalised_df(spark, test_group="ad"))
+        assert df.collect()[0]["is_control"] is False
+
+    def test_adds_ad_freq_bucket_column(self, spark):
+        """
+        enrich() must add an ad_freq_bucket column.
+        """
+        df = enrich(self._normalised_df(spark))
+        assert "ad_freq_bucket" in df.columns
+
+    def test_bucket_zero(self, spark):
+        """0 ads → 'zero' bucket."""
+        df = enrich(self._normalised_df(spark, total_ads=0))
+        assert df.collect()[0]["ad_freq_bucket"] == "zero"
+
+    def test_bucket_low_boundary_start(self, spark):
+        """1 ad → 'low' bucket — lower boundary of low."""
+        df = enrich(self._normalised_df(spark, total_ads=1))
+        assert df.collect()[0]["ad_freq_bucket"] == "low"
+
+    def test_bucket_low_boundary_end(self, spark):
+        """5 ads → still 'low' — upper boundary of low."""
+        df = enrich(self._normalised_df(spark, total_ads=5))
+        assert df.collect()[0]["ad_freq_bucket"] == "low"
+
+    def test_bucket_medium(self, spark):
+        """6 ads → 'medium' — first value above low."""
+        df = enrich(self._normalised_df(spark, total_ads=6))
+        assert df.collect()[0]["ad_freq_bucket"] == "medium"
+
+    def test_bucket_high_boundary(self, spark):
+        """50 ads → 'high' — upper boundary of high."""
+        df = enrich(self._normalised_df(spark, total_ads=50))
+        assert df.collect()[0]["ad_freq_bucket"] == "high"
+
+    def test_bucket_very_high(self, spark):
+        """51 ads → 'very_high' — first value above high."""
+        df = enrich(self._normalised_df(spark, total_ads=51))
+        assert df.collect()[0]["ad_freq_bucket"] == "very_high"
+
+    def test_bucket_null_ads_is_unknown(self, spark):
+        """
+        Null total_ads → 'unknown' bucket.
+        Without this, nulls fall through all conditions silently
+        and produce None in the bucket column, breaking GROUP BY.
+        """
+        schema = StructType([
+            StructField("user_id",       IntegerType(), nullable=False),
+            StructField("test_group",    StringType(),  nullable=False),
+            StructField("converted",     BooleanType(), nullable=False),
+            StructField("total_ads",     IntegerType(), nullable=True),
+            StructField("most_ads_day",  StringType(),  nullable=True),
+            StructField("most_ads_hour", IntegerType(), nullable=True),
+        ])
+        df = spark.createDataFrame(
+            [(1, "ad", False, None, "Monday", 10)],
+            schema=schema
+        )
+        result = enrich(df).collect()[0]["ad_freq_bucket"]
+        assert result == "unknown"
+
+    def test_adds_ingestion_date_column(self, spark):
+        """
+        enrich() must add an ingestion_date column.
+        Used for Parquet partitioning in Step 6.
+        """
+        df = enrich(self._normalised_df(spark))
+        assert "ingestion_date" in df.columns
+
+    def test_ingestion_date_is_today(self, spark):
+        """
+        ingestion_date must equal today's UTC date.
+        We compare against date.today() — if this test runs
+        exactly at midnight UTC it could theoretically fail,
+        but that's acceptable for a pipeline test.
+        """
+        df = enrich(self._normalised_df(spark))
+        result = df.collect()[0]["ingestion_date"]
+        assert result == date.today()

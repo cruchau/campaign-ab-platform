@@ -237,3 +237,64 @@ def normalise(df: DataFrame) -> DataFrame:
              .otherwise(F.col("most_ads_hour"))
         )
     )
+    
+    
+# ── Step 5: enrich() ──────────────────────────────────────────────────────────
+# Adds derived columns that don't exist in the raw data.
+# None of these change existing values — they only add new information.
+#
+# Why add these here rather than in dbt?
+#   - is_control and ad_freq_bucket are needed by the Parquet writer
+#     (Step 6) for partitioning decisions
+#   - Having them in the raw Parquet means dbt models can use them
+#     directly without re-deriving them
+#   - ingestion_date is a pipeline metadata column — it belongs at
+#     ingestion time, not in the transformation layer
+
+from datetime import datetime, timezone
+
+
+def enrich(df: DataFrame) -> DataFrame:
+    """
+    Adds derived columns to the normalised DataFrame.
+
+    New columns:
+        is_control     : True if test_group == 'psa' (control group)
+        ad_freq_bucket : categorical bucket based on total_ads volume
+        ingestion_date : date this pipeline run executed (for partitioning)
+    """
+    # Capture the current UTC date once — we use F.lit() to broadcast
+    # this single value to every row. Using F.current_date() would also
+    # work but F.lit() makes the value explicit and easier to mock in tests.
+    today = datetime.now(tz=timezone.utc).date().isoformat()
+
+    return (
+        df
+
+        # is_control: True for PSA (control), False for ad (treatment)
+        # Cleaner than string comparison in every downstream query
+        .withColumn(
+            "is_control",
+            F.col("test_group") == F.lit("psa")
+        )
+
+        # ad_freq_bucket: segments users by ad exposure volume
+        # F.when() chains work like if / elif / elif / else
+        # The order matters — first matching condition wins
+        .withColumn(
+            "ad_freq_bucket",
+            F.when(F.col("total_ads") == 0,               F.lit("zero"))
+             .when(F.col("total_ads").between(1, 5),       F.lit("low"))
+             .when(F.col("total_ads").between(6, 20),      F.lit("medium"))
+             .when(F.col("total_ads").between(21, 50),     F.lit("high"))
+             .when(F.col("total_ads") > 50,                F.lit("very_high"))
+             .otherwise(F.lit("unknown"))  # catches nulls
+        )
+
+        # ingestion_date: pipeline run date for Parquet partitioning
+        # Stored as a date string — cast to DateType for proper partitioning
+        .withColumn(
+            "ingestion_date",
+            F.to_date(F.lit(today))
+        )
+    )
