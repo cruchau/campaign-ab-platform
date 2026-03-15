@@ -67,6 +67,9 @@ test-step1:
 
 test-step2:
 	pytest tests/test_spark_ingest.py::TestReadRaw -v --tb=short
+
+test-step3:
+	pytest tests/test_spark_ingest.py::TestNormalise -v --tb=short
  
 lint:
 	ruff check ingestion/ ab_engine/ ml/ dashboard/ tests/

@@ -187,3 +187,53 @@ def read_raw(spark: SparkSession, csv_path: Path) -> "DataFrame":
     row_count = df.count()
     log.info("Loaded %d rows with %d columns", row_count, len(df.columns))
     return df
+
+
+# ── Step 4: normalise() ───────────────────────────────────────────────────────
+# Cleans the raw DataFrame — no new columns, just fixing what's there.
+#
+# Three responsibilities:
+#   1. Rename columns: remove spaces (breaks SQL and dbt)
+#   2. Lowercase test_group: prevents "Ad" vs "ad" creating phantom groups
+#   3. Fix hour=24: some exports use 1-based hours; normalise to 0-based
+#
+# We import functions as F — standard PySpark convention.
+# F.col("name") selects a column, F.lower() lowercases it,
+# F.trim() removes leading/trailing whitespace,
+# F.when().otherwise() is PySpark's if/else for column expressions.
+
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
+
+
+def normalise(df: DataFrame) -> DataFrame:
+    """
+    Cleans and standardises the raw DataFrame.
+
+    Input:  raw columns with spaces, mixed case, possible hour=24
+    Output: snake_case columns, lowercase test_group, hours in 0-23
+    """
+    return (
+        df
+        # Step 4a: rename all columns to snake_case
+        # toDF() takes a list of new names in the same order as current columns
+        .toDF("user_id", "test_group", "converted",
+              "total_ads", "most_ads_day", "most_ads_hour")
+
+        # Step 4b: lowercase and trim test_group
+        # F.trim() removes accidental whitespace, F.lower() normalises case
+        .withColumn("test_group", F.trim(F.lower(F.col("test_group"))))
+
+        # Step 4c: normalise most_ads_day capitalisation
+        # "monday" → "Monday" so string comparisons work consistently
+        .withColumn("most_ads_day", F.trim(F.initcap(F.col("most_ads_day"))))
+
+        # Step 4d: fix hour=24 → hour=0
+        # F.when(condition, value).otherwise(other_value) is PySpark's
+        # equivalent of: IF condition THEN value ELSE other_value
+        .withColumn(
+            "most_ads_hour",
+            F.when(F.col("most_ads_hour") == 24, F.lit(0))
+             .otherwise(F.col("most_ads_hour"))
+        )
+    )

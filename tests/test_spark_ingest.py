@@ -293,4 +293,107 @@ class TestReadRaw:
         row = df.collect()[0]
         assert row["total ads"] is None
         assert row["most ads day"] is None
-        assert row["most ads hour"] is None  
+
+
+
+# ── Step 4 tests: normalise() ─────────────────────────────────────────────────
+# We test each transformation independently.
+# Each test creates a minimal 1-row DataFrame with only the columns
+# relevant to that test — keeps tests focused and failures easy to diagnose.
+#
+# spark.createDataFrame(data, schema) where schema is a list of strings
+# is a shorthand for simple schemas — Spark infers types from the data.
+# For precise type control we use the full StructType (like in read_raw).
+
+from ingestion.spark_ingest import normalise
+from pyspark.sql.types import (
+    BooleanType, IntegerType, StringType, StructField, StructType
+)
+
+
+class TestNormalise:
+
+    def _raw_df(self, spark, test_group="ad", most_ads_day="monday",
+                most_ads_hour=10, total_ads=5):
+        """
+        Helper that creates a minimal raw DataFrame matching what
+        read_raw() would produce — spaces in column names, raw values.
+        We reuse this across tests, overriding only what each test needs.
+        """
+        schema = StructType([
+            StructField("user id",       IntegerType(), nullable=False),
+            StructField("test group",    StringType(),  nullable=False),
+            StructField("converted",     BooleanType(), nullable=False),
+            StructField("total ads",     IntegerType(), nullable=True),
+            StructField("most ads day",  StringType(),  nullable=True),
+            StructField("most ads hour", IntegerType(), nullable=True),
+        ])
+        return spark.createDataFrame(
+            [(1, test_group, False, total_ads, most_ads_day, most_ads_hour)],
+            schema=schema
+        )
+
+    def test_renames_columns_to_snake_case(self, spark):
+        """
+        Spaces in column names break SQL queries and dbt models.
+        After normalise(), all column names must use underscores.
+        """
+        df = normalise(self._raw_df(spark))
+        assert "user_id"       in df.columns
+        assert "test_group"    in df.columns
+        assert "total_ads"     in df.columns
+        assert "most_ads_day"  in df.columns
+        assert "most_ads_hour" in df.columns
+
+    def test_removes_spaced_column_names(self, spark):
+        """
+        The old spaced names must be completely gone — not just
+        shadowed by the new ones. Having both would confuse dbt.
+        """
+        df = normalise(self._raw_df(spark))
+        assert "user id"       not in df.columns
+        assert "test group"    not in df.columns
+        assert "total ads"     not in df.columns
+
+    def test_lowercases_test_group(self, spark):
+        """
+        "Ad", "AD", "aD" must all become "ad".
+        Without this, groupBy("test_group") silently creates
+        extra groups and the A/B split looks wrong.
+        """
+        df = normalise(self._raw_df(spark, test_group="Ad"))
+        assert df.collect()[0]["test_group"] == "ad"
+
+    def test_trims_whitespace_from_test_group(self, spark):
+        """
+        "  ad  " must become "ad".
+        Trailing whitespace is invisible in logs but breaks equality checks.
+        """
+        df = normalise(self._raw_df(spark, test_group="  ad  "))
+        assert df.collect()[0]["test_group"] == "ad"
+
+    def test_title_cases_most_ads_day(self, spark):
+        """
+        "monday" → "Monday", "FRIDAY" → "Friday".
+        Consistent capitalisation so downstream filters like
+        WHERE most_ads_day = 'Monday' work reliably.
+        """
+        df = normalise(self._raw_df(spark, most_ads_day="monday"))
+        assert df.collect()[0]["most_ads_day"] == "Monday"
+
+    def test_fixes_hour_24_to_0(self, spark):
+        """
+        Some data exports use hour=24 for midnight instead of 0.
+        Both mean the same time but 24 is out of the 0-23 range
+        and breaks time-of-day analysis. We normalise it to 0.
+        """
+        df = normalise(self._raw_df(spark, most_ads_hour=24))
+        assert df.collect()[0]["most_ads_hour"] == 0
+
+    def test_leaves_valid_hours_unchanged(self, spark):
+        """
+        The hour=24 fix must only change 24 — not any other value.
+        Without this test, a bug could zero out all hours.
+        """
+        df = normalise(self._raw_df(spark, most_ads_hour=13))
+        assert df.collect()[0]["most_ads_hour"] == 13
