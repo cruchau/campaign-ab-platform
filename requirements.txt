@@ -1,0 +1,27 @@
+# Core
+pyspark==3.5.1
+dbt-duckdb==1.8.1         # local warehouse (no cloud account needed)
+duckdb>=1.0.0,<2.0.0      # dbt-duckdb 1.8.1 requires duckdb !=0.10.3; let pip resolve
+ 
+# Data ingestion
+kagglehub>=0.2.0           # programmatic Kaggle dataset download
+
+# A/B testing & stats
+scipy==1.13.1
+statsmodels==0.14.2
+numpy==1.26.4
+pandas==2.2.2
+ 
+# ML
+xgboost==2.0.3
+scikit-learn==1.5.0
+shap==0.45.1
+ 
+# Dashboard
+streamlit==1.35.0
+plotly==5.22.0
+ 
+# Dev / CI
+pytest==8.2.2
+pytest-cov==5.0.0
+ruff==0.4.7               # linter
